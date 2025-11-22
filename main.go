@@ -39,6 +39,7 @@ var (
 	rateLimiter   *RateLimiter
 	emailRegex    = regexp.MustCompile(`^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$`)
 	urlRegex      = regexp.MustCompile(`^https?://[a-zA-Z0-9\-._~:/?#[\]@!$&'()*+,;=]+$`)
+	htmlRegex     = regexp.MustCompile(`<[^>]*>|&lt;|&gt;|&#?\w+;`)
 )
 
 func NewRateLimiter(r rate.Limit, b int) *RateLimiter {
@@ -116,6 +117,25 @@ func getClientIP(r *http.Request) string {
 	return strings.Split(r.RemoteAddr, ":")[0]
 }
 
+func isAllowedOrigin(origin string) bool {
+	if origin == "" {
+		return false
+	}
+
+	origin = strings.TrimPrefix(origin, "https://")
+	origin = strings.TrimPrefix(origin, "http://")
+
+	if idx := strings.Index(origin, ":"); idx != -1 {
+		origin = origin[:idx]
+	}
+
+	return origin == "prigoana.com" || strings.HasSuffix(origin, ".prigoana.com")
+}
+
+func containsHTML(s string) bool {
+	return htmlRegex.MatchString(s)
+}
+
 func rateLimitMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ip := getClientIP(r)
@@ -132,9 +152,14 @@ func rateLimitMiddleware(next http.HandlerFunc) http.HandlerFunc {
 
 func corsMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		origin := r.Header.Get("Origin")
+
+		if origin != "" && isAllowedOrigin(origin) {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+			w.Header().Set("Access-Control-Allow-Credentials", "true")
+		}
 
 		if r.Method == "OPTIONS" {
 			w.WriteHeader(http.StatusOK)
@@ -146,10 +171,21 @@ func corsMiddleware(next http.HandlerFunc) http.HandlerFunc {
 }
 
 func validateMessage(msg *Message) error {
-	msg.Name = strings.TrimSpace(sanitizer.Sanitize(msg.Name))
-	msg.Message = strings.TrimSpace(sanitizer.Sanitize(msg.Message))
+	msg.Name = strings.TrimSpace(msg.Name)
+	msg.Message = strings.TrimSpace(msg.Message)
 	msg.Contact = strings.TrimSpace(msg.Contact)
 	msg.Avatar = strings.TrimSpace(msg.Avatar)
+
+	if containsHTML(msg.Name) {
+		return fmt.Errorf("HTML tags are not allowed in name")
+	}
+
+	if containsHTML(msg.Message) {
+		return fmt.Errorf("HTML tags are not allowed in message")
+	}
+
+	msg.Name = sanitizer.Sanitize(msg.Name)
+	msg.Message = sanitizer.Sanitize(msg.Message)
 
 	if len(msg.Name) < 2 || len(msg.Name) > 100 {
 		return fmt.Errorf("name must be between 2 and 100 characters")
@@ -160,6 +196,9 @@ func validateMessage(msg *Message) error {
 	}
 
 	if msg.Contact != "" {
+		if containsHTML(msg.Contact) {
+			return fmt.Errorf("HTML tags are not allowed in contact")
+		}
 		if !emailRegex.MatchString(msg.Contact) && !urlRegex.MatchString(msg.Contact) {
 			return fmt.Errorf("invalid email or website format")
 		}
@@ -251,7 +290,7 @@ func handleGetMessages(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleIndex(w http.ResponseWriter, r *http.Request) {
-	http.ServeFile(w, r, "index.html")
+	http.Redirect(w, r, "https://prigoana.com/", http.StatusMovedPermanently)
 }
 
 func main() {
